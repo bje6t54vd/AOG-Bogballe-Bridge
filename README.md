@@ -29,7 +29,10 @@ The window shows:
 - The map colors rate values on a continuous dark-green-to-green, light-green, yellow, orange, red, and dark-red gradient from the selected field's minimum to maximum. Intermediate values receive interpolated colors.
 - AOG Fix2Fix heading is preferred; when absent, the Bridge estimates course from moving GPS positions. Rate control is disabled until a fresh heading is available and the full toolbar line is covered by valid rate polygons.
 - **GPS-to-toolbar offset (m)** can be saved in the live-data panel; positive values place the toolbar behind the GPS point. It defaults to 0 m because AOG does not provide this offset in the UDP data used by the Bridge.
-- The on/off state of each section
+- The commanded on/off state of each section and its requested target rate. The calibrator set-rate readback is global and is not a measured physical flow rate or a per-section actual rate.
+- The **Tools** menu can start and stop an operational CSV recording or request a calibrator set-rate readback. The CSV records valid GPS samples, speed, section states, bridge target rate, and the most recent calibrator set-rate readback with its timestamp and age. Logging is user-started and the save location is selected explicitly.
+
+The CSV is an operational data log, **not a certified or Danish statutory as-applied record**. The Danish rules reviewed require fertilizer allocation and nutrient-accounting information but do not prescribe a per-section as-applied format; ISOXML is an interoperability standard, not a legal mandate. Confirm current reporting obligations with the relevant Danish authority or adviser. Sources: [Gødskningsloven §§ 16, 18, 22 and 44](https://www.retsinformation.dk/eli/lta/2026/759/dan/xml), [ISO 11783 Task Data XML](https://www.isobus.net/isobus/attachments/files/ISO11783_TaskFile_V3-3.xsd).
 
 Select **Minimal display** to switch to a fixed 400 px wide, 50 px high, always-on-top status bar showing speed, width, and target rate when shapefile rate control is active. It initially appears centered on the primary screen. Drag the bar to reposition it; its position is saved in the current user's registry and restored the next time minimal display is selected. Select **Full window** or press **Esc** to return to the normal display.
 

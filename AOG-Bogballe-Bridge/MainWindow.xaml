@@ -9,7 +9,8 @@
         Width="1200"
         MinHeight="650"
         MinWidth="900"
-        PreviewKeyDown="MainWindow_PreviewKeyDown">
+        PreviewKeyDown="MainWindow_PreviewKeyDown"
+        Closing="MainWindow_Closing">
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
@@ -20,10 +21,25 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Padding="12" Margin="0,0,0,10"
+        <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,6">
+            <TextBlock DockPanel.Dock="Right" Text="{Binding LoggingStatus}" TextTrimming="CharacterEllipsis"
+                       VerticalAlignment="Center" Margin="12,0,0,0" MaxWidth="680" FontSize="11" Foreground="DimGray"
+                       ToolTip="Operational CSV data only; this is not a certified statutory record."/>
+            <Menu>
+                <MenuItem Header="_Tools">
+                    <MenuItem Header="Start as-applied CSV recording..." Click="StartAsAppliedLogging_Click"/>
+                    <MenuItem Header="Stop as-applied recording" Click="StopAsAppliedLogging_Click"/>
+                    <Separator/>
+                    <MenuItem Header="Request calibrator set-rate readback" Click="RequestCalibratorReadback_Click"/>
+                </MenuItem>
+            </Menu>
+        </DockPanel>
+
+        <Border Grid.Row="1" Padding="12" Margin="0,0,0,10"
                 BorderBrush="LightGray" BorderThickness="1" CornerRadius="4">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -107,13 +123,14 @@
                             Background="#EEF5FB" CornerRadius="4" Padding="8,4" Margin="4,4,0,4">
                         <StackPanel VerticalAlignment="Center">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Set value" FontWeight="Bold" FontSize="13" VerticalAlignment="Center"
-                                           ToolTip="Application rate reported by the Bogballe calibrator."/>
+                                <TextBlock Text="Calibrator set rate" FontWeight="Bold" FontSize="13" VerticalAlignment="Center"
+                                           ToolTip="Set application rate reported by the Bogballe calibrator; not a measured physical flow rate."/>
                                 <TextBlock Text="{Binding CalibratorSetRateDisplay}"
                                            FontWeight="Bold" FontSize="18" Foreground="DarkSlateBlue"
                                            Margin="8,0,0,0" VerticalAlignment="Center"
-                                           ToolTip="Application rate reported by the Bogballe calibrator."/>
+                                           ToolTip="Set application rate reported by the Bogballe calibrator; not a measured physical flow rate."/>
                             </StackPanel>
+                            <TextBlock Text="{Binding CalibratorReadbackStatus}" FontSize="10" Foreground="DimGray"/>
                             <TextBlock Text="{Binding LegacyRateFallbackNote}" FontSize="10" Foreground="DimGray"/>
                         </StackPanel>
                     </Border>
@@ -137,7 +154,7 @@
             </Grid>
         </Border>
 
-        <Border Grid.Row="1" Padding="12" Margin="0,0,0,10"
+        <Border Grid.Row="2" Padding="12" Margin="0,0,0,10"
                 BorderBrush="LightGray" BorderThickness="1" CornerRadius="4">
             <DockPanel>
                 <TextBlock DockPanel.Dock="Top" Text="Sections" FontWeight="Bold" FontSize="14"/>
@@ -147,12 +164,16 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Border Margin="3" Height="30" BorderBrush="DarkGray" BorderThickness="1"
-                                    CornerRadius="3" Background="{Binding Background}">
-                                <TextBlock Text="{Binding RateDisplay}" FontSize="10" FontWeight="SemiBold"
-                                           Foreground="Black" TextAlignment="Center" VerticalAlignment="Center"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTip="Average target application rate across this section."/>
+                            <Border Margin="3" Height="40" BorderBrush="DarkGray" BorderThickness="1"
+                                    CornerRadius="3" Background="{Binding Background}"
+                                    ToolTip="Section state is commanded by AgOpenGPS. The rate is the bridge target, not a measured per-section application rate.">
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding StateDisplay}" FontSize="10" FontWeight="Bold"
+                                               Foreground="Black" TextAlignment="Center"/>
+                                    <TextBlock Text="{Binding RateDisplay}" FontSize="9" FontWeight="SemiBold"
+                                               Foreground="Black" TextAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
                             </Border>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
@@ -160,7 +181,7 @@
             </DockPanel>
         </Border>
 
-        <Border Grid.Row="2" Padding="12" BorderBrush="LightGray" BorderThickness="1"
+        <Border Grid.Row="3" Padding="12" BorderBrush="LightGray" BorderThickness="1"
                 CornerRadius="4" ClipToBounds="True">
             <Grid>
                 <Grid.RowDefinitions>

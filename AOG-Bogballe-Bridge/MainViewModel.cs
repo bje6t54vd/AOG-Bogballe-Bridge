@@ -10,6 +10,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -45,6 +46,11 @@ namespace AOGBogballeBridge
         private bool _rateZoneValid;
         private string? _currentApplicationRate;
         private string? _lastSentApplicationRate;
+        private double? _lastRequestedTargetRate;
+        private double? _calibratorSetRate;
+        private DateTime? _calibratorSetRateReadbackAt;
+        private double[] _sectionTargetRates = Array.Empty<double>();
+        private AsAppliedCsvLogger? _asAppliedLogger;
         private bool _spreaderEnabledLast = true;
 
         private string? _selectedPort;
@@ -98,6 +104,13 @@ namespace AOGBogballeBridge
 
         public ICommand RefreshPortsCommand { get; }
         public ICommand LoadShapefileCommand { get; }
+
+        public bool IsAsAppliedLogging => _asAppliedLogger != null;
+        public string LoggingStatus { get; private set; } = "As-applied logging is stopped.";
+
+        public string CalibratorReadbackStatus => !_calibratorSetRateReadbackAt.HasValue
+            ? "Waiting for calibrator readback."
+            : $"Last readback {_calibratorSetRateReadbackAt.Value:HH:mm:ss} UTC";
 
         public bool GpsConnected
         {
@@ -434,7 +447,7 @@ namespace AOGBogballeBridge
             ShapefileFields = new ObservableCollection<string>();
 
             for (int i = 0; i < 8; i++)
-                Sections.Add(new SectionDisplay(Brushes.Gray));
+                Sections.Add(new SectionDisplay(i + 1, Brushes.Gray));
 
             // Initialize display values
             Speed = 0;
@@ -859,6 +872,7 @@ namespace AOGBogballeBridge
             UpdateToolHeading(data, gpsPosition, receivedAt);
             UpdateToolbarPosition();
             UpdateApplicationRate();
+            RecordAsAppliedSample(receivedAt);
         }
 
         private void InvalidateGpsOutPosition()
@@ -973,6 +987,7 @@ namespace AOGBogballeBridge
             if (!ShapefileLoaded)
             {
                 _rateZoneValid = false;
+                _lastRequestedTargetRate = null;
                 SetSectionRateDisplays(null);
                 CurrentApplicationRate = "Shapefile rate control off; using normal spreader control.";
                 return;
@@ -1012,6 +1027,10 @@ namespace AOGBogballeBridge
             SetSectionRateDisplays(rateText == null ? null : sectionRates);
             bool rateChanged = !string.Equals(_currentApplicationRate, rateText, StringComparison.Ordinal);
             _rateZoneValid = rateText != null;
+            _lastRequestedTargetRate = rateText != null &&
+                double.TryParse(rateText, NumberStyles.Float, CultureInfo.InvariantCulture, out double requestedRate)
+                    ? requestedRate
+                    : null;
             CurrentApplicationRate = rateText ?? status;
             GpsStatus = status;
 
@@ -1033,6 +1052,7 @@ namespace AOGBogballeBridge
 
         private void SetSectionRateDisplays(IReadOnlyList<double>? rates)
         {
+            _sectionTargetRates = rates?.ToArray() ?? Array.Empty<double>();
             for (int i = 0; i < Sections.Count; i++)
             {
                 string display = rates != null && i < rates.Count
@@ -1305,12 +1325,14 @@ namespace AOGBogballeBridge
             {
                 if (i >= shown)
                 {
-                    Sections[i].Background = Brushes.Gray; // not part of the configured machine
+                    Sections[i].Background = Brushes.Gray;
+                    Sections[i].StateDisplay = "—";
                     continue;
                 }
 
                 bool active = (mask & (1 << i)) != 0;
                 Sections[i].Background = active ? Brushes.LimeGreen : Brushes.DarkGray;
+                Sections[i].StateDisplay = active ? "ON" : "OFF";
             }
         }
 
@@ -1381,6 +1403,134 @@ namespace AOGBogballeBridge
                 SerialConnected = false;
             }
         }
+
+        public bool StartAsAppliedLogging(string filePath)
+        {
+            if (_asAppliedLogger != null)
+            {
+                LoggingStatus = "As-applied logging is already running.";
+                OnPropertyChanged(nameof(LoggingStatus));
+                return false;
+            }
+
+            try
+            {
+                _asAppliedLogger = new AsAppliedCsvLogger(filePath);
+                LoggingStatus = $"Recording operational data to {filePath}";
+                OnPropertyChanged(nameof(LoggingStatus));
+                OnPropertyChanged(nameof(IsAsAppliedLogging));
+                return true;
+            }
+            catch (IOException ex)
+            {
+                LoggingStatus = $"Could not start recording: {ex.Message}";
+                OnPropertyChanged(nameof(LoggingStatus));
+                return false;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                LoggingStatus = $"Could not start recording: {ex.Message}";
+                OnPropertyChanged(nameof(LoggingStatus));
+                return false;
+            }
+        }
+
+        public async Task StopAsAppliedLoggingAsync()
+        {
+            AsAppliedCsvLogger? logger = _asAppliedLogger;
+            if (logger == null)
+                return;
+
+            _asAppliedLogger = null;
+            OnPropertyChanged(nameof(IsAsAppliedLogging));
+            try
+            {
+                await logger.DisposeAsync();
+                LoggingStatus = logger.FailureMessage is string failure
+                    ? $"Recording stopped with data loss: {failure}"
+                    : $"Recording saved to {logger.FilePath}";
+            }
+            catch (IOException ex)
+            {
+                LoggingStatus = $"Recording stopped with a file error: {ex.Message}";
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                LoggingStatus = $"Recording stopped with a file error: {ex.Message}";
+            }
+            OnPropertyChanged(nameof(LoggingStatus));
+        }
+
+        public void RequestCalibratorReadback()
+        {
+            if (!SerialConnected)
+            {
+                RateProtocolStatus = IsSimulatorMode
+                    ? "Calibrator readback is unavailable in simulator mode."
+                    : "Connect a Bogballe calibrator to request a readback.";
+                return;
+            }
+
+            if (_rateCommandAckTimer.IsEnabled)
+            {
+                RateProtocolStatus = "Waiting for the current rate command response before requesting readback.";
+                return;
+            }
+
+            RateProtocolStatus = SendToSpreader("rDC")
+                ? "Requested calibrator set-rate readback."
+                : "Calibrator readback request could not be sent.";
+        }
+
+        private void RecordAsAppliedSample(DateTime receivedAt)
+        {
+            AsAppliedCsvLogger? logger = _asAppliedLogger;
+            if (logger == null)
+                return;
+
+            string[] fields = new string[33];
+            fields[0] = "sample";
+            fields[1] = receivedAt.ToString("O", CultureInfo.InvariantCulture);
+            fields[2] = _gpsLatitude.ToString("G17", CultureInfo.InvariantCulture);
+            fields[3] = _gpsLongitude.ToString("G17", CultureInfo.InvariantCulture);
+            fields[4] = ToolbarPositionValid ? _toolbarLatitude.ToString("G17", CultureInfo.InvariantCulture) : string.Empty;
+            fields[5] = ToolbarPositionValid ? _toolbarLongitude.ToString("G17", CultureInfo.InvariantCulture) : string.Empty;
+            fields[6] = _toolHeadingValid ? _toolHeadingDegrees.ToString("0.##", CultureInfo.InvariantCulture) : string.Empty;
+            fields[7] = _validConfig ? MachineWidthMeters.ToString("0.##", CultureInfo.InvariantCulture) : string.Empty;
+            fields[8] = _speed.ToString("0.0", CultureInfo.InvariantCulture);
+            fields[9] = _validConfig ? _secNum.ToString(CultureInfo.InvariantCulture) : string.Empty;
+            fields[10] = _lastRequestedTargetRate?.ToString("0.##", CultureInfo.InvariantCulture) ?? string.Empty;
+            fields[11] = _calibratorSetRate?.ToString("0.##", CultureInfo.InvariantCulture) ?? string.Empty;
+            fields[12] = _calibratorSetRateReadbackAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty;
+            fields[13] = _calibratorSetRateReadbackAt.HasValue
+                ? Math.Max(0, (receivedAt - _calibratorSetRateReadbackAt.Value).TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)
+                : string.Empty;
+            fields[14] = ShapefileLoaded ? ShapefileName : string.Empty;
+            fields[15] = ShapefileLoaded ? SelectedShapefileField ?? string.Empty : string.Empty;
+
+            for (int i = 0; i < 8; i++)
+            {
+                fields[16 + i] = _validConfig && i < _secNum
+                    ? (_currentSectionMask & (1 << i)) != 0 ? "ON" : "OFF"
+                    : string.Empty;
+                fields[24 + i] = _validConfig && i < _sectionTargetRates.Length && i < _secNum
+                    ? _sectionTargetRates[i].ToString("0.##", CultureInfo.InvariantCulture)
+                    : string.Empty;
+            }
+            fields[32] = "";
+
+            string row = string.Join(",", fields.Select(EscapeCsvField));
+            if (logger.TryWrite(row))
+                return;
+
+            string reason = logger.FailureMessage ?? "The recording queue filled; some samples may be missing.";
+            _ = StopAsAppliedLoggingAsync();
+            LoggingStatus = $"Recording stopped: {reason}";
+            OnPropertyChanged(nameof(LoggingStatus));
+        }
+
+        private static string EscapeCsvField(string value) =>
+            $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
         private bool SendToSpreader(string message)
         {
@@ -1562,7 +1712,7 @@ namespace AOGBogballeBridge
                     !double.IsFinite(acknowledgedRate))
                     continue;
 
-                CalibratorSetRateDisplay = FormatCalibratorRate(acknowledgedRate);
+                SetCalibratorSetRateReadback(acknowledgedRate);
                 _appRatProtocolConfirmed = true;
                 _legacyRateProtocolConfirmed = false;
                 _rateCommandAckTimer.Stop();
@@ -1580,7 +1730,7 @@ namespace AOGBogballeBridge
 
             string command = payload[..2];
             if (command is "WD" or "wD" or "AD" or "aD")
-                CalibratorSetRateDisplay = FormatCalibratorRate(reportedRate);
+                SetCalibratorSetRateReadback(reportedRate);
             else
                 return false;
 
@@ -1599,8 +1749,19 @@ namespace AOGBogballeBridge
 
         private void ResetCalibratorRateReadbacks()
         {
+            _calibratorSetRate = null;
+            _calibratorSetRateReadbackAt = null;
             CalibratorSetRateDisplay = "—";
+            OnPropertyChanged(nameof(CalibratorReadbackStatus));
             SetLegacyRateFallbackUsed(false);
+        }
+
+        private void SetCalibratorSetRateReadback(double rate)
+        {
+            _calibratorSetRate = rate;
+            _calibratorSetRateReadbackAt = DateTime.UtcNow;
+            CalibratorSetRateDisplay = FormatCalibratorRate(rate);
+            OnPropertyChanged(nameof(CalibratorReadbackStatus));
         }
 
         private void SetLegacyRateFallbackUsed(bool used)
@@ -1735,12 +1896,27 @@ namespace AOGBogballeBridge
     {
         private Brush _background;
         private string _rateDisplay = "—";
+        private string _stateDisplay = "—";
 
         public event PropertyChangedEventHandler? PropertyChanged;
+        public int SectionNumber { get; }
 
-        public SectionDisplay(Brush background)
+        public SectionDisplay(int sectionNumber, Brush background)
         {
+            SectionNumber = sectionNumber;
             _background = background;
+        }
+
+        public string StateDisplay
+        {
+            get => $"S{SectionNumber} {_stateDisplay}";
+            set
+            {
+                if (string.Equals(_stateDisplay, value, StringComparison.Ordinal))
+                    return;
+                _stateDisplay = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateDisplay)));
+            }
         }
 
         public Brush Background

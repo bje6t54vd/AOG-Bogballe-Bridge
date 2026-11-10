@@ -1,4 +1,5 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Globalization;
 using Microsoft.Win32;
 using System.Windows;
@@ -19,6 +20,7 @@ namespace AOGBogballeBridge
         private double _restoreMinHeight;
         private bool _restoreTopmost;
         private bool _isMinimalDisplay;
+        private bool _isClosingAfterLogFlush;
 
         public MainWindow()
         {
@@ -110,6 +112,47 @@ namespace AOGBogballeBridge
             FullLayout.Visibility = Visibility.Visible;
             WindowState = _restoreState;
             _isMinimalDisplay = false;
+        }
+
+        private void StartAsAppliedLogging_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is not MainViewModel viewModel || viewModel.IsAsAppliedLogging)
+                return;
+
+            SaveFileDialog dialog = new()
+            {
+                Title = "Save operational as-applied CSV",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+                DefaultExt = ".csv",
+                AddExtension = true,
+                FileName = $"AOG-Bogballe-as-applied-{DateTime.Now:yyyyMMdd-HHmmss}.csv",
+                OverwritePrompt = true
+            };
+            if (dialog.ShowDialog(this) == true)
+                viewModel.StartAsAppliedLogging(dialog.FileName);
+        }
+
+        private async void StopAsAppliedLogging_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is MainViewModel viewModel)
+                await viewModel.StopAsAppliedLoggingAsync();
+        }
+
+        private void RequestCalibratorReadback_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is MainViewModel viewModel)
+                viewModel.RequestCalibratorReadback();
+        }
+
+        private async void MainWindow_Closing(object? sender, CancelEventArgs e)
+        {
+            if (_isClosingAfterLogFlush || DataContext is not MainViewModel viewModel || !viewModel.IsAsAppliedLogging)
+                return;
+
+            e.Cancel = true;
+            await viewModel.StopAsAppliedLoggingAsync();
+            _isClosingAfterLogFlush = true;
+            Close();
         }
 
         private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
