@@ -51,6 +51,7 @@ namespace AOGBogballeBridge
         private DateTime? _calibratorSetRateReadbackAt;
         private double[] _sectionTargetRates = Array.Empty<double>();
         private AsAppliedCsvLogger? _asAppliedLogger;
+        private long _lastAsAppliedSampleTimestamp;
         private bool _spreaderEnabledLast = true;
 
         private string? _selectedPort;
@@ -1416,7 +1417,8 @@ namespace AOGBogballeBridge
             try
             {
                 _asAppliedLogger = new AsAppliedCsvLogger(filePath);
-                LoggingStatus = $"Recording operational data to {filePath}";
+                _lastAsAppliedSampleTimestamp = 0;
+                LoggingStatus = $"Recording operational data to {filePath} (max 1 sample/second)";
                 OnPropertyChanged(nameof(LoggingStatus));
                 OnPropertyChanged(nameof(IsAsAppliedLogging));
                 return true;
@@ -1488,6 +1490,11 @@ namespace AOGBogballeBridge
             if (logger == null)
                 return;
 
+            long sampleTimestamp = Stopwatch.GetTimestamp();
+            if (_lastAsAppliedSampleTimestamp != 0 &&
+                sampleTimestamp - _lastAsAppliedSampleTimestamp < Stopwatch.Frequency)
+                return;
+
             string[] fields = new string[33];
             fields[0] = "sample";
             fields[1] = receivedAt.ToString("O", CultureInfo.InvariantCulture);
@@ -1521,7 +1528,10 @@ namespace AOGBogballeBridge
 
             string row = string.Join(",", fields.Select(EscapeCsvField));
             if (logger.TryWrite(row))
+            {
+                _lastAsAppliedSampleTimestamp = sampleTimestamp;
                 return;
+            }
 
             string reason = logger.FailureMessage ?? "The recording queue filled; some samples may be missing.";
             _ = StopAsAppliedLoggingAsync();
