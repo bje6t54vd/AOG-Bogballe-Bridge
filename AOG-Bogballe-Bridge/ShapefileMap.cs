@@ -6,23 +6,27 @@ namespace AOGBogballeBridge
 {
     public sealed class ShapefileMap : FrameworkElement
     {
+        private DrawingGroup? _baseMapDrawing;
+        private Size _baseMapSize;
+        private Func<Point, Point>? _projectCoordinates;
+
         public static readonly DependencyProperty FeaturesProperty = DependencyProperty.Register(
             nameof(Features),
             typeof(IReadOnlyList<ShapefileFeature>),
             typeof(ShapefileMap),
-            new FrameworkPropertyMetadata(Array.Empty<ShapefileFeature>(), FrameworkPropertyMetadataOptions.AffectsRender));
+            new FrameworkPropertyMetadata(Array.Empty<ShapefileFeature>(), FrameworkPropertyMetadataOptions.AffectsRender, OnBaseMapPropertyChanged));
 
         public static readonly DependencyProperty ValueFieldProperty = DependencyProperty.Register(
             nameof(ValueField),
             typeof(string),
             typeof(ShapefileMap),
-            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender, OnBaseMapPropertyChanged));
 
         public static readonly DependencyProperty IsGeographicProperty = DependencyProperty.Register(
             nameof(IsGeographic),
             typeof(bool),
             typeof(ShapefileMap),
-            new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
+            new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender, OnBaseMapPropertyChanged));
 
         public static readonly DependencyProperty GpsPositionValidProperty = DependencyProperty.Register(
             nameof(GpsPositionValid),
@@ -141,90 +145,126 @@ namespace AOGBogballeBridge
         protected override void OnRender(DrawingContext drawingContext)
         {
             base.OnRender(drawingContext);
-            drawingContext.DrawRectangle(Brushes.White, null, new Rect(RenderSize));
-
-            Point[] points = Features
-                .SelectMany(feature => feature.Parts)
-                .SelectMany(part => part)
-                .ToArray();
-            if (points.Length == 0 || ActualWidth <= 0 || ActualHeight <= 0)
+            EnsureBaseMap();
+            if (_baseMapDrawing == null)
                 return;
 
-            double centerLongitude = (points.Min(point => point.X) + points.Max(point => point.X)) / 2;
-            double centerLatitude = (points.Min(point => point.Y) + points.Max(point => point.Y)) / 2;
-            double latitudeScale = Math.Cos(centerLatitude * Math.PI / 180);
-            Point ToMap(Point point) => IsGeographic
-                ? new Point(
-                    6_378_137 * (point.X - centerLongitude) * Math.PI / 180 * latitudeScale,
-                    6_378_137 * (point.Y - centerLatitude) * Math.PI / 180)
-                : point;
-
-            Point[] mapPoints = points.Select(ToMap).ToArray();
-            double minX = mapPoints.Min(point => point.X);
-            double maxX = mapPoints.Max(point => point.X);
-            double minY = mapPoints.Min(point => point.Y);
-            double maxY = mapPoints.Max(point => point.Y);
-            double spanX = Math.Max(maxX - minX, 1e-12);
-            double spanY = Math.Max(maxY - minY, 1e-12);
-            const double margin = 20;
-            double scale = Math.Min(
-                Math.Max(0, ActualWidth - margin * 2) / spanX,
-                Math.Max(0, ActualHeight - margin * 2) / spanY);
-            if (!double.IsFinite(scale) || scale <= 0)
+            drawingContext.DrawDrawing(_baseMapDrawing);
+            if (!IsGeographic || _projectCoordinates == null)
                 return;
 
-            double contentWidth = spanX * scale;
-            double contentHeight = spanY * scale;
-            double offsetX = (ActualWidth - contentWidth) / 2 - minX * scale;
-            double offsetY = (ActualHeight - contentHeight) / 2 + maxY * scale;
-            Point Project(Point point)
+            if (GpsPositionValid)
             {
-                Point mapPoint = ToMap(point);
-                return new Point(offsetX + mapPoint.X * scale, offsetY - mapPoint.Y * scale);
-            }
-
-            double[]? values = ValueField == null
-                ? null
-                : Features.Select(feature => feature.Attributes.TryGetValue(ValueField, out string? text) &&
-                                              double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) &&
-                                              double.IsFinite(value)
-                    ? (double?)value
-                    : null).Where(value => value.HasValue).Select(value => value!.Value).ToArray();
-            double minValue = values is { Length: > 0 } ? values.Min() : 0;
-            double maxValue = values is { Length: > 0 } ? values.Max() : 0;
-
-            foreach (ShapefileFeature feature in Features)
-            {
-                Brush fill = GetFillBrush(feature, minValue, maxValue);
-                Pen outline = new(Brushes.SlateGray, 1);
-                switch (feature.GeometryType)
-                {
-                    case ShapefileGeometryType.Polygon:
-                        drawingContext.DrawGeometry(fill, outline, CreateGeometry(feature.Parts, Project, close: true));
-                        break;
-                    case ShapefileGeometryType.Polyline:
-                        drawingContext.DrawGeometry(null, outline, CreateGeometry(feature.Parts, Project, close: false));
-                        break;
-                    case ShapefileGeometryType.Point:
-                    case ShapefileGeometryType.MultiPoint:
-                        foreach (Point point in feature.Parts.SelectMany(part => part))
-                            drawingContext.DrawEllipse(fill, outline, Project(point), 3.5, 3.5);
-                        break;
-                }
-            }
-
-            if (IsGeographic && GpsPositionValid)
-            {
-                Point location = Project(new Point(GpsLongitude, GpsLatitude));
+                Point location = _projectCoordinates(new Point(GpsLongitude, GpsLatitude));
                 if (new Rect(RenderSize).Contains(location))
                     drawingContext.DrawEllipse(Brushes.Red, new Pen(Brushes.White, 2), location, 7, 7);
             }
 
-            if (IsGeographic && ToolbarPositionValid && MachineWidthMeters > 0 && SectionWidthsMeters.Count > 0)
-                DrawToolbar(drawingContext, Project);
+            if (ToolbarPositionValid && MachineWidthMeters > 0 && SectionWidthsMeters.Count > 0)
+                DrawToolbar(drawingContext, _projectCoordinates);
+        }
 
-            if (ValueField != null && values is { Length: > 0 })
-                DrawLegend(drawingContext, minValue, maxValue);
+        protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+        {
+            _baseMapDrawing = null;
+            _projectCoordinates = null;
+            base.OnRenderSizeChanged(sizeInfo);
+        }
+
+        private static void OnBaseMapPropertyChanged(DependencyObject dependencyObject, DependencyPropertyChangedEventArgs e)
+        {
+            ShapefileMap map = (ShapefileMap)dependencyObject;
+            map._baseMapDrawing = null;
+            map._projectCoordinates = null;
+        }
+
+        private void EnsureBaseMap()
+        {
+            if (_baseMapDrawing != null && _baseMapSize == RenderSize)
+                return;
+
+            _projectCoordinates = null;
+            DrawingGroup mapDrawing = new();
+            using (DrawingContext drawingContext = mapDrawing.Open())
+            {
+                drawingContext.DrawRectangle(Brushes.White, null, new Rect(RenderSize));
+                Point[] points = Features
+                    .SelectMany(feature => feature.Parts)
+                    .SelectMany(part => part)
+                    .ToArray();
+                if (points.Length > 0 && ActualWidth > 0 && ActualHeight > 0)
+                {
+                    double centerLongitude = (points.Min(point => point.X) + points.Max(point => point.X)) / 2;
+                    double centerLatitude = (points.Min(point => point.Y) + points.Max(point => point.Y)) / 2;
+                    double latitudeScale = Math.Cos(centerLatitude * Math.PI / 180);
+                    Point ToMap(Point point) => IsGeographic
+                        ? new Point(
+                            6_378_137 * (point.X - centerLongitude) * Math.PI / 180 * latitudeScale,
+                            6_378_137 * (point.Y - centerLatitude) * Math.PI / 180)
+                        : point;
+
+                    Point[] mapPoints = points.Select(ToMap).ToArray();
+                    double minX = mapPoints.Min(point => point.X);
+                    double maxX = mapPoints.Max(point => point.X);
+                    double minY = mapPoints.Min(point => point.Y);
+                    double maxY = mapPoints.Max(point => point.Y);
+                    double spanX = Math.Max(maxX - minX, 1e-12);
+                    double spanY = Math.Max(maxY - minY, 1e-12);
+                    const double margin = 20;
+                    double scale = Math.Min(
+                        Math.Max(0, ActualWidth - margin * 2) / spanX,
+                        Math.Max(0, ActualHeight - margin * 2) / spanY);
+                    if (double.IsFinite(scale) && scale > 0)
+                    {
+                        double contentWidth = spanX * scale;
+                        double contentHeight = spanY * scale;
+                        double offsetX = (ActualWidth - contentWidth) / 2 - minX * scale;
+                        double offsetY = (ActualHeight - contentHeight) / 2 + maxY * scale;
+                        Point Project(Point point)
+                        {
+                            Point mapPoint = ToMap(point);
+                            return new Point(offsetX + mapPoint.X * scale, offsetY - mapPoint.Y * scale);
+                        }
+
+                        _projectCoordinates = Project;
+                        double[]? values = ValueField == null
+                            ? null
+                            : Features.Select(feature => feature.Attributes.TryGetValue(ValueField, out string? text) &&
+                                                          double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) &&
+                                                          double.IsFinite(value)
+                                ? (double?)value
+                                : null).Where(value => value.HasValue).Select(value => value!.Value).ToArray();
+                        double minValue = values is { Length: > 0 } ? values.Min() : 0;
+                        double maxValue = values is { Length: > 0 } ? values.Max() : 0;
+
+                        foreach (ShapefileFeature feature in Features)
+                        {
+                            Brush fill = GetFillBrush(feature, minValue, maxValue);
+                            Pen outline = new(Brushes.SlateGray, 1);
+                            switch (feature.GeometryType)
+                            {
+                                case ShapefileGeometryType.Polygon:
+                                    drawingContext.DrawGeometry(fill, outline, CreateGeometry(feature.Parts, Project, close: true));
+                                    break;
+                                case ShapefileGeometryType.Polyline:
+                                    drawingContext.DrawGeometry(null, outline, CreateGeometry(feature.Parts, Project, close: false));
+                                    break;
+                                case ShapefileGeometryType.Point:
+                                case ShapefileGeometryType.MultiPoint:
+                                    foreach (Point point in feature.Parts.SelectMany(part => part))
+                                        drawingContext.DrawEllipse(fill, outline, Project(point), 3.5, 3.5);
+                                    break;
+                            }
+                        }
+
+                        if (ValueField != null && values is { Length: > 0 })
+                            DrawLegend(drawingContext, minValue, maxValue);
+                    }
+                }
+            }
+
+            _baseMapDrawing = mapDrawing;
+            _baseMapSize = RenderSize;
         }
 
         private void DrawToolbar(DrawingContext drawingContext, Func<Point, Point> project)

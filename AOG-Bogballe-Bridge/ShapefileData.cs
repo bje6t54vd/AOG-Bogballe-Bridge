@@ -19,6 +19,10 @@ namespace AOGBogballeBridge
         public ShapefileGeometryType GeometryType { get; }
         public IReadOnlyList<IReadOnlyList<Point>> Parts { get; }
         public IReadOnlyDictionary<string, string> Attributes { get; }
+        public double MinX { get; }
+        public double MinY { get; }
+        public double MaxX { get; }
+        public double MaxY { get; }
 
         internal ShapefileFeature(
             ShapefileGeometryType geometryType,
@@ -28,11 +32,17 @@ namespace AOGBogballeBridge
             GeometryType = geometryType;
             Parts = parts;
             Attributes = attributes;
+            Point[] points = parts.SelectMany(part => part).ToArray();
+            MinX = points.Length == 0 ? 0 : points.Min(point => point.X);
+            MinY = points.Length == 0 ? 0 : points.Min(point => point.Y);
+            MaxX = points.Length == 0 ? 0 : points.Max(point => point.X);
+            MaxY = points.Length == 0 ? 0 : points.Max(point => point.Y);
         }
 
         public bool Contains(Point point)
         {
-            if (GeometryType != ShapefileGeometryType.Polygon)
+            if (GeometryType != ShapefileGeometryType.Polygon ||
+                point.X < MinX || point.X > MaxX || point.Y < MinY || point.Y > MaxY)
                 return false;
 
             bool inside = false;

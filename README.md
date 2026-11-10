@@ -25,7 +25,7 @@ The window shows:
 - **UDP** status light - green when data is arriving from AgIO; the output light is green for an open COM port and blue for the virtual simulator
 - Live speed, width, shapefile target rate, and the set application rate read back from the Bogballe calibrator
 - The machine configuration received from AgOpenGPS
-- Variable-rate control samples the full toolbar width using each AOG section's dimensions and averages the selected DBF rate values across the swath. The map shows the GPS reference point and toolbar line when heading and dimensions are available.
+- Variable-rate control samples the full toolbar width using each AOG section's dimensions and averages the selected DBF rate values across the swath. The current average target rate for each section is shown beneath its section indicator. Rate updates are sent as the calculated target changes; the map shows the GPS reference point and toolbar line when heading and dimensions are available.
 - AOG Fix2Fix heading is preferred; when absent, the Bridge estimates course from moving GPS positions. Rate control is disabled until a fresh heading is available and the full toolbar line is covered by valid rate polygons.
 - **GPS-to-toolbar offset (m)** can be saved in the live-data panel; positive values place the toolbar behind the GPS point. It defaults to 0 m because AOG does not provide this offset in the UDP data used by the Bridge.
 - The on/off state of each section

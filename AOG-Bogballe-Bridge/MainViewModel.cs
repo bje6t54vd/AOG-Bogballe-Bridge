@@ -26,6 +26,7 @@ namespace AOGBogballeBridge
 
         public ObservableCollection<string> AvailablePorts { get; }
         public ObservableCollection<Brush> Sections { get; }
+        public ObservableCollection<string> SectionRateDisplays { get; }
         public ObservableCollection<string> ShapefileFields { get; }
 
         private IReadOnlyList<ShapefileFeature> _shapefileFeatures = Array.Empty<ShapefileFeature>();
@@ -75,14 +76,16 @@ namespace AOGBogballeBridge
         private string _rateProtocolStatus = "Waiting for a valid application rate.";
         private readonly object _serialReceiveLock = new();
         private string _serialReceiveBuffer = string.Empty;
-        private string? _pendingFallbackRate;
         private string? _pendingFallbackCommand;
+        private bool _appRatProtocolConfirmed;
+        private bool _legacyRateProtocolConfirmed;
 
-        // Machine configuration received from AgOpenGPS (PGN 0xEB)
+        // Machine configuration
         private int _secNum;
         private double _secWidth; // cm
         private bool _validConfig;
         private int _activeSectionsLast;
+        private int _activeSectionMaskLast = -1;
         private int _aogVersion;
         private bool _versionWarned;
         private DateTime _lastGpsPacket;
@@ -429,10 +432,14 @@ namespace AOGBogballeBridge
             foreach (string port in SerialPort.GetPortNames())
                 AvailablePorts.Add(port);
             Sections = new ObservableCollection<Brush>();
+            SectionRateDisplays = new ObservableCollection<string>();
             ShapefileFields = new ObservableCollection<string>();
 
             for (int i = 0; i < 8; i++)
+            {
                 Sections.Add(Brushes.Gray);
+                SectionRateDisplays.Add("—");
+            }
 
             // Initialize display values
             Speed = 0;
@@ -971,12 +978,14 @@ namespace AOGBogballeBridge
             if (!ShapefileLoaded)
             {
                 _rateZoneValid = false;
+                SetSectionRateDisplays(null);
                 CurrentApplicationRate = "Shapefile rate control off; using normal spreader control.";
                 return;
             }
 
             string? rateText = null;
             string status;
+            double[]? sectionRates = null;
 
             if (!GpsPositionValid)
             {
@@ -994,7 +1003,7 @@ namespace AOGBogballeBridge
             {
                 status = "Waiting for valid toolbar width and heading; spreading disabled.";
             }
-            else if (!TryCalculateSwathRate(out double averageRate, out string rateFailure))
+            else if (!TryCalculateSwathRates(out double averageRate, out sectionRates, out string rateFailure))
             {
                 status = rateFailure;
             }
@@ -1005,9 +1014,9 @@ namespace AOGBogballeBridge
                 status = $"Full toolbar coverage; average application rate {rateText} kg/ha.";
             }
 
-            bool rateValid = rateText != null;
+            SetSectionRateDisplays(rateText == null ? null : sectionRates);
             bool rateChanged = !string.Equals(_currentApplicationRate, rateText, StringComparison.Ordinal);
-            _rateZoneValid = rateValid;
+            _rateZoneValid = rateText != null;
             CurrentApplicationRate = rateText ?? status;
             GpsStatus = status;
 
@@ -1015,8 +1024,7 @@ namespace AOGBogballeBridge
             {
                 if (rateChanged || _lastSentApplicationRate == null)
                 {
-                    string? fallbackCommand = TryBuildUniqLegacyRateCommand(rateText);
-                    SendAppRatWithFallback(rateText, fallbackCommand);
+                    SendAppRatWithFallback(rateText, TryBuildUniqLegacyRateCommand(rateText));
                     _lastSentApplicationRate = rateText;
                 }
             }
@@ -1028,11 +1036,24 @@ namespace AOGBogballeBridge
             SendEnable();
         }
 
-        private bool TryCalculateSwathRate(out double averageRate, out string failure)
+        private void SetSectionRateDisplays(IReadOnlyList<double>? rates)
+        {
+            for (int i = 0; i < SectionRateDisplays.Count; i++)
+            {
+                string display = rates != null && i < rates.Count
+                    ? $"{Math.Round(rates[i], 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture)} kg/ha"
+                    : "—";
+                if (!string.Equals(SectionRateDisplays[i], display, StringComparison.Ordinal))
+                    SectionRateDisplays[i] = display;
+            }
+        }
+
+        private bool TryCalculateSwathRates(out double averageRate, out double[]? sectionRates, out string failure)
         {
             averageRate = 0;
+            sectionRates = null;
             double totalWidth = MachineWidthMeters;
-            if (!double.IsFinite(totalWidth) || totalWidth <= 0 || !ToolbarPositionValid ||
+            if (!double.IsFinite(totalWidth) || totalWidth <= 0 || !_validConfig || !ToolbarPositionValid ||
                 string.IsNullOrWhiteSpace(SelectedShapefileField))
             {
                 failure = "Toolbar geometry is invalid; spreading disabled.";
@@ -1041,12 +1062,49 @@ namespace AOGBogballeBridge
 
             Point toolbarCenter = new(_toolbarLongitude, _toolbarLatitude);
             double halfWidth = totalWidth / 2;
+            double latitudeRadius = halfWidth / 6_371_000 * 180 / Math.PI + 1e-7;
+            double longitudeCosine = Math.Max(Math.Abs(Math.Cos(DegreesToRadians(toolbarCenter.Y))), 1e-6);
+            double longitudeRadius = halfWidth / (6_371_000 * longitudeCosine) * 180 / Math.PI + 1e-7;
+            double minLongitude = toolbarCenter.X - longitudeRadius;
+            double maxLongitude = toolbarCenter.X + longitudeRadius;
+            double minLatitude = toolbarCenter.Y - latitudeRadius;
+            double maxLatitude = toolbarCenter.Y + latitudeRadius;
+            bool crossesAntimeridian = minLongitude < -180 || maxLongitude > 180;
+            ShapefileFeature[] nearbyFeatures = ShapefileFeatures.Where(feature =>
+                feature.GeometryType == ShapefileGeometryType.Polygon &&
+                (crossesAntimeridian || (feature.MaxX >= minLongitude && feature.MinX <= maxLongitude)) &&
+                feature.MaxY >= minLatitude && feature.MinY <= maxLatitude).ToArray();
+
             List<double> boundaries = new() { -halfWidth, halfWidth };
-            AddSwathPolygonIntersections(toolbarCenter, _toolHeadingDegrees + 90, halfWidth, boundaries);
+            double sectionBoundary = -halfWidth;
+            foreach (double sectionWidth in _sectionWidthsMeters)
+            {
+                sectionBoundary += sectionWidth;
+                if (sectionBoundary < halfWidth - 0.0001)
+                    boundaries.Add(sectionBoundary);
+            }
+
+            AddSwathPolygonIntersections(
+                toolbarCenter,
+                _toolHeadingDegrees + 90,
+                halfWidth,
+                nearbyFeatures,
+                boundaries);
             boundaries.Sort();
 
             double weightedRateSum = 0;
             double coveredWidth = 0;
+            double[] sectionWeightedRates = new double[_secNum];
+            double[] sectionCoveredWidths = new double[_secNum];
+            double[] sectionEnds = new double[_secNum];
+            double nextSectionEnd = -halfWidth;
+            for (int i = 0; i < _secNum; i++)
+            {
+                nextSectionEnd += _sectionWidthsMeters[i];
+                sectionEnds[i] = nextSectionEnd;
+            }
+
+            int sectionIndex = 0;
             double previousBoundary = boundaries[0];
             for (int i = 1; i < boundaries.Count; i++)
             {
@@ -1056,8 +1114,11 @@ namespace AOGBogballeBridge
                     continue;
 
                 double crossTrackDistance = (previousBoundary + boundary) / 2;
+                while (sectionIndex < _secNum - 1 && crossTrackDistance >= sectionEnds[sectionIndex])
+                    sectionIndex++;
+
                 Point samplePoint = MovePointByBearing(toolbarCenter, _toolHeadingDegrees + 90, crossTrackDistance);
-                ShapefileFeature? feature = ShapefileFeatures.FirstOrDefault(candidate => candidate.Contains(samplePoint));
+                ShapefileFeature? feature = nearbyFeatures.FirstOrDefault(candidate => candidate.Contains(samplePoint));
                 if (feature == null)
                 {
                     failure = "Toolbar crosses an uncovered area; spreading disabled.";
@@ -1073,13 +1134,15 @@ namespace AOGBogballeBridge
                 }
 
                 weightedRateSum += rate * segmentWidth;
-                if (!double.IsFinite(weightedRateSum))
+                sectionWeightedRates[sectionIndex] += rate * segmentWidth;
+                if (!double.IsFinite(weightedRateSum) || !double.IsFinite(sectionWeightedRates[sectionIndex]))
                 {
                     failure = "Calculated toolbar rate is outside the supported numeric range; spreading disabled.";
                     return false;
                 }
 
                 coveredWidth += segmentWidth;
+                sectionCoveredWidths[sectionIndex] += segmentWidth;
                 previousBoundary = boundary;
             }
 
@@ -1089,10 +1152,30 @@ namespace AOGBogballeBridge
                 return false;
             }
 
+            sectionRates = new double[_secNum];
+            for (int i = 0; i < _secNum; i++)
+            {
+                if (Math.Abs(sectionCoveredWidths[i] - _sectionWidthsMeters[i]) > 0.001)
+                {
+                    failure = "Full coverage could not be verified for every section; spreading disabled.";
+                    sectionRates = null;
+                    return false;
+                }
+
+                sectionRates[i] = sectionWeightedRates[i] / _sectionWidthsMeters[i];
+                if (!double.IsFinite(sectionRates[i]))
+                {
+                    failure = "Calculated section rate is outside the supported numeric range; spreading disabled.";
+                    sectionRates = null;
+                    return false;
+                }
+            }
+
             averageRate = weightedRateSum / totalWidth;
             if (!double.IsFinite(averageRate))
             {
                 failure = "Calculated toolbar rate is outside the supported numeric range; spreading disabled.";
+                sectionRates = null;
                 return false;
             }
 
@@ -1100,7 +1183,12 @@ namespace AOGBogballeBridge
             return true;
         }
 
-        private void AddSwathPolygonIntersections(Point center, double crossTrackBearing, double halfWidth, List<double> boundaries)
+        private void AddSwathPolygonIntersections(
+            Point center,
+            double crossTrackBearing,
+            double halfWidth,
+            IReadOnlyList<ShapefileFeature> nearbyFeatures,
+            List<double> boundaries)
         {
             double bearingRadians = DegreesToRadians(crossTrackBearing);
             double directionX = Math.Sin(bearingRadians);
@@ -1122,11 +1210,8 @@ namespace AOGBogballeBridge
                     6_371_000 * DegreesToRadians(point.Y - center.Y));
             }
 
-            foreach (ShapefileFeature feature in ShapefileFeatures)
+            foreach (ShapefileFeature feature in nearbyFeatures)
             {
-                if (feature.GeometryType != ShapefileGeometryType.Polygon)
-                    continue;
-
                 foreach (IReadOnlyList<Point> ring in feature.Parts)
                 {
                     for (int i = 0, j = ring.Count - 1; i < ring.Count; j = i++)
@@ -1251,7 +1336,8 @@ namespace AOGBogballeBridge
             {
                 _rateCommandAckTimer.Stop();
                 _rateReadbackTimer.Stop();
-                _pendingFallbackRate = null;
+                _appRatProtocolConfirmed = false;
+                _legacyRateProtocolConfirmed = false;
                 _pendingFallbackCommand = null;
                 ResetCalibratorRateReadbacks();
                 lock (_serialReceiveLock)
@@ -1338,30 +1424,44 @@ namespace AOGBogballeBridge
 
         private void SendAppRatWithFallback(string rate, string? fallbackCommand)
         {
-            _rateCommandAckTimer.Stop();
-            SetLegacyRateFallbackUsed(false);
-            _pendingFallbackRate = fallbackCommand == null ? null : rate;
-            _pendingFallbackCommand = fallbackCommand;
+            if (_legacyRateProtocolConfirmed && fallbackCommand != null)
+            {
+                bool legacyWritten = SendToSpreader(fallbackCommand);
+                SetLegacyRateFallbackUsed(legacyWritten && !IsSimulatorMode);
+                if (!legacyWritten)
+                    RateProtocolStatus = "UNIQ legacy rate command could not be sent.";
+                return;
+            }
+
             bool appRatSent = SendToSpreader($"S:AppRat:{rate}:");
             if (!appRatSent)
             {
-                _pendingFallbackRate = null;
-                _pendingFallbackCommand = null;
+                if (!_rateCommandAckTimer.IsEnabled)
+                {
+                    _pendingFallbackCommand = null;
+                }
                 RateProtocolStatus = "Application-rate command could not be sent.";
                 return;
             }
 
-            if (fallbackCommand != null && (IsSimulatorMode || SerialConnected))
+            if (fallbackCommand == null)
             {
-                // Give AppRat time to receive a reply instead of immediately sending a duplicate legacy rate.
+                _pendingFallbackCommand = null;
+                RateProtocolStatus = "Rate exceeds the UNIQ legacy fallback limit (99999 kg/ha).";
+                return;
+            }
+
+            if (_appRatProtocolConfirmed)
+                return;
+
+            // Refresh the fallback target without restarting the first acknowledgement window.
+            _pendingFallbackCommand = fallbackCommand;
+            if (!_rateCommandAckTimer.IsEnabled && (IsSimulatorMode || SerialConnected))
+            {
                 RateProtocolStatus = IsSimulatorMode
                     ? "Simulator recorded AppRat; waiting for a real calibrator response."
                     : "Waiting for a Bogballe response; UNIQ fallback follows if needed.";
                 _rateCommandAckTimer.Start();
-            }
-            else if (fallbackCommand == null)
-            {
-                RateProtocolStatus = "Rate exceeds the UNIQ legacy fallback limit (99999 kg/ha).";
             }
         }
 
@@ -1370,10 +1470,10 @@ namespace AOGBogballeBridge
             _rateCommandAckTimer.Stop();
             string? fallbackCommand = _pendingFallbackCommand;
             _pendingFallbackCommand = null;
-            _pendingFallbackRate = null;
 
             if (fallbackCommand != null && (IsSimulatorMode || SerialConnected))
             {
+                _legacyRateProtocolConfirmed = true;
                 bool fallbackWritten = SendToSpreader(fallbackCommand);
                 SetLegacyRateFallbackUsed(fallbackWritten && !IsSimulatorMode);
                 RateProtocolStatus = IsSimulatorMode
@@ -1468,13 +1568,9 @@ namespace AOGBogballeBridge
                     continue;
 
                 CalibratorSetRateDisplay = FormatCalibratorRate(acknowledgedRate);
-                if (_pendingFallbackRate == null ||
-                    !double.TryParse(_pendingFallbackRate, NumberStyles.Float, CultureInfo.InvariantCulture, out double pendingRate) ||
-                    Math.Abs(acknowledgedRate - pendingRate) > 0.005)
-                    continue;
-
+                _appRatProtocolConfirmed = true;
+                _legacyRateProtocolConfirmed = false;
                 _rateCommandAckTimer.Stop();
-                _pendingFallbackRate = null;
                 _pendingFallbackCommand = null;
                 SetLegacyRateFallbackUsed(false);
                 RateProtocolStatus = $"Bogballe acknowledged {fields[2]} kg/ha; legacy fallback not used.";
@@ -1495,6 +1591,10 @@ namespace AOGBogballeBridge
 
             if (command is "AD" or "aD")
             {
+                _legacyRateProtocolConfirmed = true;
+                _appRatProtocolConfirmed = false;
+                _rateCommandAckTimer.Stop();
+                _pendingFallbackCommand = null;
                 SetLegacyRateFallbackUsed(true);
                 RateProtocolStatus = $"Calibrator set rate: {FormatCalibratorRate(reportedRate)} (UNIQ legacy).";
             }
@@ -1575,12 +1675,15 @@ namespace AOGBogballeBridge
         private void SendEnable()
         {
             int activeSections = _validConfig ? CountActiveSections() : 0;
+            int activeSectionMask = _validConfig ? _currentSectionMask : 0;
             bool rateAllowsSpreading = !ShapefileLoaded || _rateZoneValid;
             bool shouldEnable = _validConfig && rateAllowsSpreading && activeSections > 0;
-            if (activeSections == _activeSectionsLast && shouldEnable == _spreaderEnabledLast)
+            if (activeSections == _activeSectionsLast && activeSectionMask == _activeSectionMaskLast &&
+                shouldEnable == _spreaderEnabledLast)
                 return;
 
             _activeSectionsLast = activeSections;
+            _activeSectionMaskLast = activeSectionMask;
             _spreaderEnabledLast = shouldEnable;
 
             // Format: {S:SOrlSE:1:checksum} (1 = spreading enabled, 0 = disabled)
@@ -1592,7 +1695,14 @@ namespace AOGBogballeBridge
         private void SendActiveWidth()
         {
             // Format: {S:SOrlWt:1:width_m:checksum}
-            double activeWidth = Math.Round(_activeSectionsLast * _secWidth / 100.0, 1);
+            double activeWidth = 0;
+            for (int i = 0; i < _secNum; i++)
+            {
+                if ((_currentSectionMask & (1 << i)) != 0)
+                    activeWidth += _sectionWidthsCm[i] / 100.0;
+            }
+
+            activeWidth = Math.Round(activeWidth, 1);
             SendToSpreader($"S:SOrlWt:1:{activeWidth.ToString("F1", CultureInfo.InvariantCulture)}:");
         }
 
@@ -1601,7 +1711,7 @@ namespace AOGBogballeBridge
             // Format: {S:SprdWt:width_m checksum}
             // Built for protocol completeness but not transmitted, matching the
             // original Python implementation where this write was disabled.
-            double totalWidth = Math.Round(_secWidth * _secNum / 100.0, 1);
+            double totalWidth = Math.Round(MachineWidthMeters, 1);
             Debug.WriteLine($"Total spread width: {{S:SprdWt:{totalWidth.ToString("F1", CultureInfo.InvariantCulture)}}} (not transmitted)");
         }
 
