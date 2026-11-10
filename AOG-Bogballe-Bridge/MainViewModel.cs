@@ -25,8 +25,7 @@ namespace AOGBogballeBridge
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public ObservableCollection<string> AvailablePorts { get; }
-        public ObservableCollection<Brush> Sections { get; }
-        public ObservableCollection<string> SectionRateDisplays { get; }
+        public ObservableCollection<SectionDisplay> Sections { get; }
         public ObservableCollection<string> ShapefileFields { get; }
 
         private IReadOnlyList<ShapefileFeature> _shapefileFeatures = Array.Empty<ShapefileFeature>();
@@ -431,15 +430,11 @@ namespace AOGBogballeBridge
             AvailablePorts = new ObservableCollection<string> { SimulatorPort };
             foreach (string port in SerialPort.GetPortNames())
                 AvailablePorts.Add(port);
-            Sections = new ObservableCollection<Brush>();
-            SectionRateDisplays = new ObservableCollection<string>();
+            Sections = new ObservableCollection<SectionDisplay>();
             ShapefileFields = new ObservableCollection<string>();
 
             for (int i = 0; i < 8; i++)
-            {
-                Sections.Add(Brushes.Gray);
-                SectionRateDisplays.Add("—");
-            }
+                Sections.Add(new SectionDisplay(Brushes.Gray));
 
             // Initialize display values
             Speed = 0;
@@ -1038,13 +1033,13 @@ namespace AOGBogballeBridge
 
         private void SetSectionRateDisplays(IReadOnlyList<double>? rates)
         {
-            for (int i = 0; i < SectionRateDisplays.Count; i++)
+            for (int i = 0; i < Sections.Count; i++)
             {
                 string display = rates != null && i < rates.Count
                     ? $"{Math.Round(rates[i], 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture)} kg/ha"
                     : "—";
-                if (!string.Equals(SectionRateDisplays[i], display, StringComparison.Ordinal))
-                    SectionRateDisplays[i] = display;
+                if (!string.Equals(Sections[i].RateDisplay, display, StringComparison.Ordinal))
+                    Sections[i].RateDisplay = display;
             }
         }
 
@@ -1310,12 +1305,12 @@ namespace AOGBogballeBridge
             {
                 if (i >= shown)
                 {
-                    Sections[i] = Brushes.Gray; // not part of the configured machine
+                    Sections[i].Background = Brushes.Gray; // not part of the configured machine
                     continue;
                 }
 
                 bool active = (mask & (1 << i)) != 0;
-                Sections[i] = active ? Brushes.LimeGreen : Brushes.DarkGray;
+                Sections[i].Background = active ? Brushes.LimeGreen : Brushes.DarkGray;
             }
         }
 
@@ -1733,6 +1728,43 @@ namespace AOGBogballeBridge
         private void OnPropertyChanged(string name)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+    }
+
+    public sealed class SectionDisplay : INotifyPropertyChanged
+    {
+        private Brush _background;
+        private string _rateDisplay = "—";
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public SectionDisplay(Brush background)
+        {
+            _background = background;
+        }
+
+        public Brush Background
+        {
+            get => _background;
+            set
+            {
+                if (ReferenceEquals(_background, value))
+                    return;
+                _background = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Background)));
+            }
+        }
+
+        public string RateDisplay
+        {
+            get => _rateDisplay;
+            set
+            {
+                if (string.Equals(_rateDisplay, value, StringComparison.Ordinal))
+                    return;
+                _rateDisplay = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RateDisplay)));
+            }
         }
     }
 

@@ -141,31 +141,22 @@
                 BorderBrush="LightGray" BorderThickness="1" CornerRadius="4">
             <DockPanel>
                 <TextBlock DockPanel.Dock="Top" Text="Sections" FontWeight="Bold" FontSize="14"/>
-                <StackPanel>
-                    <ItemsControl ItemsSource="{Binding Sections}" Margin="0,6,0,0">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate><UniformGrid Rows="1" Columns="8"/></ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Border Margin="3" Height="24" BorderBrush="DarkGray" BorderThickness="1"
-                                        CornerRadius="3" Background="{Binding}"/>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <ItemsControl ItemsSource="{Binding SectionRateDisplays}" Margin="3,2,3,0">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate><UniformGrid Rows="1" Columns="8"/></ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}" FontSize="10" Foreground="DimGray"
-                                           TextAlignment="Center" TextTrimming="CharacterEllipsis"
-                                           ToolTip="Average target rate across this section."/>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </StackPanel>
+                <ItemsControl ItemsSource="{Binding Sections}" Margin="0,6,0,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><UniformGrid Rows="1" Columns="8"/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Margin="3" Height="30" BorderBrush="DarkGray" BorderThickness="1"
+                                    CornerRadius="3" Background="{Binding Background}">
+                                <TextBlock Text="{Binding RateDisplay}" FontSize="10" FontWeight="SemiBold"
+                                           Foreground="Black" TextAlignment="Center" VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="Average target application rate across this section."/>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </DockPanel>
         </Border>
 

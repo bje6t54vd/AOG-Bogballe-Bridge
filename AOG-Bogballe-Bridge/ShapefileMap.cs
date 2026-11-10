@@ -6,6 +6,17 @@ namespace AOGBogballeBridge
 {
     public sealed class ShapefileMap : FrameworkElement
     {
+        private static readonly Color[] RatePalette =
+        {
+            Color.FromRgb(0, 100, 0),
+            Color.FromRgb(34, 139, 34),
+            Color.FromRgb(144, 238, 144),
+            Color.FromRgb(255, 255, 0),
+            Color.FromRgb(255, 165, 0),
+            Color.FromRgb(255, 0, 0),
+            Color.FromRgb(139, 0, 0)
+        };
+
         private DrawingGroup? _baseMapDrawing;
         private Size _baseMapSize;
         private Func<Point, Point>? _projectCoordinates;
@@ -342,10 +353,7 @@ namespace AOGBogballeBridge
             drawingContext.DrawText(fieldLabel, new Point(left + 8, top + 5));
 
             Rect colorRange = new(left + 8, top + 26, width - 16, 12);
-            LinearGradientBrush gradient = new(
-                Color.FromRgb(45, 125, 225),
-                Color.FromRgb(240, 70, 45),
-                0);
+            LinearGradientBrush gradient = CreateRateGradientBrush();
             drawingContext.DrawRectangle(gradient, null, colorRange);
 
             FormattedText minimum = new(
@@ -376,11 +384,33 @@ namespace AOGBogballeBridge
                 return new SolidColorBrush(Color.FromRgb(115, 177, 216));
 
             double fraction = maxValue > minValue ? Math.Clamp((value - minValue) / (maxValue - minValue), 0, 1) : 0.5;
-            Color color = Color.FromRgb(
-                (byte)Math.Round(45 + fraction * 195),
-                (byte)Math.Round(125 - fraction * 55),
-                (byte)Math.Round(225 - fraction * 180));
-            return new SolidColorBrush(color);
+            return new SolidColorBrush(GetRateColor(fraction));
+        }
+
+        private static LinearGradientBrush CreateRateGradientBrush()
+        {
+            LinearGradientBrush gradient = new()
+            {
+                StartPoint = new Point(0, 0.5),
+                EndPoint = new Point(1, 0.5)
+            };
+            for (int i = 0; i < RatePalette.Length; i++)
+                gradient.GradientStops.Add(new GradientStop(RatePalette[i], (double)i / (RatePalette.Length - 1)));
+            gradient.Freeze();
+            return gradient;
+        }
+
+        private static Color GetRateColor(double fraction)
+        {
+            double scaledPosition = Math.Clamp(fraction, 0, 1) * (RatePalette.Length - 1);
+            int lowerIndex = Math.Min((int)scaledPosition, RatePalette.Length - 2);
+            double blend = scaledPosition - lowerIndex;
+            Color lower = RatePalette[lowerIndex];
+            Color upper = RatePalette[lowerIndex + 1];
+            return Color.FromRgb(
+                (byte)Math.Round(lower.R + (upper.R - lower.R) * blend),
+                (byte)Math.Round(lower.G + (upper.G - lower.G) * blend),
+                (byte)Math.Round(lower.B + (upper.B - lower.B) * blend));
         }
 
         private static StreamGeometry CreateGeometry(
