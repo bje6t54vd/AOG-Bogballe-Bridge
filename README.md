@@ -25,6 +25,9 @@ The window shows:
 - **UDP** status light - green when data is arriving from AgIO; the output light is green for an open COM port and blue for the virtual simulator
 - Live speed, width, shapefile target rate, and the set application rate read back from the Bogballe calibrator
 - The machine configuration received from AgOpenGPS
+- Variable-rate control samples the full toolbar width using each AOG section's dimensions and averages the selected DBF rate values across the swath. The map shows the GPS reference point and toolbar line when heading and dimensions are available.
+- AOG Fix2Fix heading is preferred; when absent, the Bridge estimates course from moving GPS positions. Rate control is disabled until a fresh heading is available and the full toolbar line is covered by valid rate polygons.
+- **GPS-to-toolbar offset (m)** can be saved in the live-data panel; positive values place the toolbar behind the GPS point. It defaults to 0 m because AOG does not provide this offset in the UDP data used by the Bridge.
 - The on/off state of each section
 
 Select **Minimal display** to switch to a fixed 400 px wide, 50 px high, always-on-top status bar showing speed, width, and target rate when shapefile rate control is active. It initially appears centered on the primary screen. Drag the bar to reposition it; its position is saved in the current user's registry and restored the next time minimal display is selected. Select **Full window** or press **Esc** to return to the normal display.
@@ -35,7 +38,7 @@ If communication with AgIO is lost for more than 1.5 seconds, the Bridge turns o
 
 ### AgOpenGPS Setup
 
-Your tool in AgOpenGPS should be set to use 8 sections, however 2 or 4 section configurations are also supported. Sections must all be the same size.
+Your tool in AgOpenGPS should be set to use 8 sections, however 2 or 4 section configurations are also supported. Each section width is read from AgOpenGPS individually, so sections do not need to be the same size.
 
 AgOpenGPS 5.7 or newer is required. You will see a warning if an older version is detected.
 
@@ -112,4 +115,3 @@ There is always more to do, please feedback with any issues or requests.
 
 - Validation of CRC from AOG PGNs
 - Validation of acknowledgements from TOTZ
-- Add variable rate control - wait for PGN structure to mature

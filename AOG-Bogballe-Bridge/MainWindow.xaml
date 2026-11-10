@@ -123,6 +123,13 @@
                     <TextBlock Text="Live data" FontWeight="Bold" FontSize="15" Margin="0,0,0,4"/>
                     <TextBlock Text="{Binding GpsStatus}" FontWeight="SemiBold" TextWrapping="Wrap"/>
                     <TextBlock Text="{Binding GpsCoordinateText}"/>
+                    <TextBlock Text="{Binding ToolHeadingStatus}" Margin="0,2,0,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <TextBlock Text="GPS-to-toolbar offset (m)" VerticalAlignment="Center"/>
+                        <TextBox Text="{Binding ToolbarOffsetMeters, UpdateSourceTrigger=LostFocus, StringFormat={}{0:F1}}"
+                                 Width="58" Margin="8,0,0,0" Padding="3,1"
+                                 ToolTip="Positive values place the toolbar behind the GPS point; maximum magnitude is 100 m."/>
+                    </StackPanel>
                     <TextBlock Text="{Binding RateProtocolStatus}" TextWrapping="Wrap"
                                FontSize="11" Foreground="DimGray" Margin="0,3,0,0"/>
                     <TextBlock Text="{Binding ConfigText}" TextWrapping="Wrap" Margin="0,3,0,0"/>
@@ -180,13 +187,20 @@
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="{Binding ShapefileStatus}" TextWrapping="Wrap"
                                FontSize="11" Foreground="DimGray" Margin="0,0,0,5"/>
-                    <Border Grid.Row="1" BorderBrush="DarkGray" BorderThickness="1" CornerRadius="4">
+                    <Border Grid.Row="1" BorderBrush="DarkGray" BorderThickness="1" CornerRadius="4"
+                            ToolTip="Red dot: GPS reference point. Orange line: toolbar width. Dark ticks: section boundaries.">
                         <local:ShapefileMap Features="{Binding ShapefileFeatures, Mode=OneWay}"
                                             ValueField="{Binding SelectedShapefileField, Mode=OneWay}"
                                             IsGeographic="{Binding IsShapefileGeographic, Mode=OneWay}"
                                             GpsPositionValid="{Binding GpsPositionValid, Mode=OneWay}"
                                             GpsLatitude="{Binding GpsLatitude, Mode=OneWay}"
-                                            GpsLongitude="{Binding GpsLongitude, Mode=OneWay}"/>
+                                            GpsLongitude="{Binding GpsLongitude, Mode=OneWay}"
+                                            ToolbarPositionValid="{Binding ToolbarPositionValid, Mode=OneWay}"
+                                            ToolbarLatitude="{Binding ToolbarLatitude, Mode=OneWay}"
+                                            ToolbarLongitude="{Binding ToolbarLongitude, Mode=OneWay}"
+                                            ToolHeadingDegrees="{Binding ToolHeadingDegrees, Mode=OneWay}"
+                                            MachineWidthMeters="{Binding MachineWidthMeters, Mode=OneWay}"
+                                            SectionWidthsMeters="{Binding SectionWidthsMeters, Mode=OneWay}"/>
                     </Border>
                 </Grid>
             </Grid>

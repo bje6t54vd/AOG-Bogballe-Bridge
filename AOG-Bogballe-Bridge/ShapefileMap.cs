@@ -42,6 +42,30 @@ namespace AOGBogballeBridge
             typeof(ShapefileMap),
             new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
 
+        public static readonly DependencyProperty ToolbarPositionValidProperty = DependencyProperty.Register(
+            nameof(ToolbarPositionValid), typeof(bool), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty ToolbarLatitudeProperty = DependencyProperty.Register(
+            nameof(ToolbarLatitude), typeof(double), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty ToolbarLongitudeProperty = DependencyProperty.Register(
+            nameof(ToolbarLongitude), typeof(double), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty ToolHeadingDegreesProperty = DependencyProperty.Register(
+            nameof(ToolHeadingDegrees), typeof(double), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty MachineWidthMetersProperty = DependencyProperty.Register(
+            nameof(MachineWidthMeters), typeof(double), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty SectionWidthsMetersProperty = DependencyProperty.Register(
+            nameof(SectionWidthsMeters), typeof(IReadOnlyList<double>), typeof(ShapefileMap),
+            new FrameworkPropertyMetadata(Array.Empty<double>(), FrameworkPropertyMetadataOptions.AffectsRender));
+
         public IReadOnlyList<ShapefileFeature> Features
         {
             get => (IReadOnlyList<ShapefileFeature>)GetValue(FeaturesProperty);
@@ -76,6 +100,42 @@ namespace AOGBogballeBridge
         {
             get => (double)GetValue(GpsLongitudeProperty);
             set => SetValue(GpsLongitudeProperty, value);
+        }
+
+        public bool ToolbarPositionValid
+        {
+            get => (bool)GetValue(ToolbarPositionValidProperty);
+            set => SetValue(ToolbarPositionValidProperty, value);
+        }
+
+        public double ToolbarLatitude
+        {
+            get => (double)GetValue(ToolbarLatitudeProperty);
+            set => SetValue(ToolbarLatitudeProperty, value);
+        }
+
+        public double ToolbarLongitude
+        {
+            get => (double)GetValue(ToolbarLongitudeProperty);
+            set => SetValue(ToolbarLongitudeProperty, value);
+        }
+
+        public double ToolHeadingDegrees
+        {
+            get => (double)GetValue(ToolHeadingDegreesProperty);
+            set => SetValue(ToolHeadingDegreesProperty, value);
+        }
+
+        public double MachineWidthMeters
+        {
+            get => (double)GetValue(MachineWidthMetersProperty);
+            set => SetValue(MachineWidthMetersProperty, value);
+        }
+
+        public IReadOnlyList<double> SectionWidthsMeters
+        {
+            get => (IReadOnlyList<double>)GetValue(SectionWidthsMetersProperty);
+            set => SetValue(SectionWidthsMetersProperty, value);
         }
 
         protected override void OnRender(DrawingContext drawingContext)
@@ -160,8 +220,53 @@ namespace AOGBogballeBridge
                     drawingContext.DrawEllipse(Brushes.Red, new Pen(Brushes.White, 2), location, 7, 7);
             }
 
+            if (IsGeographic && ToolbarPositionValid && MachineWidthMeters > 0 && SectionWidthsMeters.Count > 0)
+                DrawToolbar(drawingContext, Project);
+
             if (ValueField != null && values is { Length: > 0 })
                 DrawLegend(drawingContext, minValue, maxValue);
+        }
+
+        private void DrawToolbar(DrawingContext drawingContext, Func<Point, Point> project)
+        {
+            Point center = new(ToolbarLongitude, ToolbarLatitude);
+            double leftBearing = ToolHeadingDegrees - 90;
+            Point start = MovePointByBearing(center, leftBearing, MachineWidthMeters / 2);
+            Point end = MovePointByBearing(center, leftBearing + 180, MachineWidthMeters / 2);
+            Point projectedStart = project(start);
+            Point projectedEnd = project(end);
+            drawingContext.DrawLine(new Pen(Brushes.White, 6), projectedStart, projectedEnd);
+            drawingContext.DrawLine(new Pen(Brushes.OrangeRed, 3), projectedStart, projectedEnd);
+
+            double distanceFromLeft = 0;
+            foreach (double sectionWidth in SectionWidthsMeters)
+            {
+                distanceFromLeft += sectionWidth;
+                if (distanceFromLeft >= MachineWidthMeters - 0.001)
+                    break;
+
+                Point boundary = MovePointByBearing(center, leftBearing, MachineWidthMeters / 2 - distanceFromLeft);
+                Point tickStart = MovePointByBearing(boundary, ToolHeadingDegrees, 0.75);
+                Point tickEnd = MovePointByBearing(boundary, ToolHeadingDegrees + 180, 0.75);
+                drawingContext.DrawLine(new Pen(Brushes.White, 4), project(tickStart), project(tickEnd));
+                drawingContext.DrawLine(new Pen(Brushes.DarkSlateGray, 1.5), project(tickStart), project(tickEnd));
+            }
+        }
+
+        private static Point MovePointByBearing(Point position, double bearingDegrees, double distanceMeters)
+        {
+            static double ToRadians(double degrees) => degrees * Math.PI / 180;
+            double bearing = ToRadians(bearingDegrees);
+            double angularDistance = distanceMeters / 6_371_000;
+            double latitude1 = ToRadians(position.Y);
+            double longitude1 = ToRadians(position.X);
+            double latitude2 = Math.Asin(
+                Math.Sin(latitude1) * Math.Cos(angularDistance) +
+                Math.Cos(latitude1) * Math.Sin(angularDistance) * Math.Cos(bearing));
+            double longitude2 = longitude1 + Math.Atan2(
+                Math.Sin(bearing) * Math.Sin(angularDistance) * Math.Cos(latitude1),
+                Math.Cos(angularDistance) - Math.Sin(latitude1) * Math.Sin(latitude2));
+            return new Point(longitude2 * 180 / Math.PI, latitude2 * 180 / Math.PI);
         }
 
         private void DrawLegend(DrawingContext drawingContext, double minValue, double maxValue)

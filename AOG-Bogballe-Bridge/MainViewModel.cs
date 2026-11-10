@@ -50,7 +50,20 @@ namespace AOGBogballeBridge
         private string? _selectedPort;
         private double _speed;
         private double _width;
+        private double[] _sectionWidthsCm = Array.Empty<double>();
+        private IReadOnlyList<double> _sectionWidthsMeters = Array.Empty<double>();
         private string _calibratorSetRateDisplay = "—";
+        private double _toolbarOffsetMeters;
+        private double _toolbarLatitude;
+        private double _toolbarLongitude;
+        private double _toolHeadingDegrees;
+        private bool _toolHeadingValid;
+        private DateTime _toolHeadingUpdatedAt;
+        private string _toolHeadingSource = "unavailable";
+        private Point? _previousGpsPosition;
+        private DateTime _previousGpsPositionAt;
+        private Point? _gpsOutPosition;
+        private DateTime _lastGpsOutPositionAt;
         private bool _legacyRateFallbackUsed;
         private bool _udpConnected;
         private bool _serialConnected;
@@ -112,6 +125,7 @@ namespace AOGBogballeBridge
                 _gpsPositionValid = value;
                 OnPropertyChanged(nameof(GpsPositionValid));
                 OnPropertyChanged(nameof(GpsCoordinateText));
+                OnPropertyChanged(nameof(ToolbarPositionValid));
             }
         }
 
@@ -136,6 +150,19 @@ namespace AOGBogballeBridge
                 OnPropertyChanged(nameof(GpsCoordinateText));
             }
         }
+
+        public double ToolbarLatitude => _toolbarLatitude;
+        public double ToolbarLongitude => _toolbarLongitude;
+        public double ToolHeadingDegrees => _toolHeadingDegrees;
+        public string ToolHeadingStatus => _toolHeadingValid &&
+            DateTime.UtcNow - _toolHeadingUpdatedAt <= TimeSpan.FromSeconds(3)
+                ? $"Heading: {_toolHeadingDegrees:F0}° ({_toolHeadingSource})"
+                : "Heading unavailable";
+        public bool ToolbarPositionValid => GpsPositionValid && _gpsOutPosition.HasValue && _validConfig && _toolHeadingValid &&
+            DateTime.UtcNow - _lastGpsOutPositionAt <= TimeSpan.FromSeconds(3) &&
+            DateTime.UtcNow - _toolHeadingUpdatedAt <= TimeSpan.FromSeconds(3) && MachineWidthMeters > 0;
+        public double MachineWidthMeters => _sectionWidthsCm.Sum() / 100.0;
+        public IReadOnlyList<double> SectionWidthsMeters => _sectionWidthsMeters;
 
         public string GpsCoordinateText => GpsPositionValid
             ? $"Lat: {GpsLatitude:F6}   Lon: {GpsLongitude:F6}"
@@ -293,10 +320,30 @@ namespace AOGBogballeBridge
         public double Width
         {
             get => _width;
-            set
+            private set
             {
                 _width = value;
                 OnPropertyChanged(nameof(Width));
+                OnPropertyChanged(nameof(ToolbarPositionValid));
+            }
+        }
+
+        public double ToolbarOffsetMeters
+        {
+            get => _toolbarOffsetMeters;
+            set
+            {
+                if (!double.IsFinite(value) || value is < -100 or > 100)
+                    throw new ArgumentOutOfRangeException(nameof(value), "Toolbar offset must be between -100 and 100 meters.");
+                if (Math.Abs(_toolbarOffsetMeters - value) < 0.001)
+                    return;
+
+                _toolbarOffsetMeters = value;
+                Properties.Settings.Default.ToolbarOffsetMeters = value;
+                Properties.Settings.Default.Save();
+                OnPropertyChanged(nameof(ToolbarOffsetMeters));
+                UpdateToolbarPosition();
+                UpdateApplicationRate();
             }
         }
 
@@ -397,6 +444,8 @@ namespace AOGBogballeBridge
             // broadcasts the section dimensions PGN 0xEB)
             _secNum = Properties.Settings.Default.SecNum;
             _secWidth = Properties.Settings.Default.SecWidth;
+            _sectionWidthsCm = ParseSavedSectionWidths(Properties.Settings.Default.SectionWidthsCm, _secNum, _secWidth);
+            _toolbarOffsetMeters = Properties.Settings.Default.ToolbarOffsetMeters;
             ApplyConfig(showWarning: false);
 
             // Load persisted COM port
@@ -490,7 +539,17 @@ namespace AOGBogballeBridge
         private void StatusTimer_Tick(object? sender, EventArgs e)
         {
             bool connected = (DateTime.Now - _lastUdp).TotalSeconds < 1.5;
-            bool gpsConnected = _lastGpsPacket != default && (DateTime.UtcNow - _lastGpsPacket).TotalSeconds < 3;
+            DateTime now = DateTime.UtcNow;
+            bool gpsConnected = _lastGpsPacket != default && (now - _lastGpsPacket).TotalSeconds < 3;
+            if (_gpsOutPosition.HasValue && now - _lastGpsOutPositionAt > TimeSpan.FromSeconds(3))
+            {
+                _gpsOutPosition = null;
+                _toolHeadingValid = false;
+                OnPropertyChanged(nameof(ToolHeadingStatus));
+                OnPropertyChanged(nameof(ToolbarPositionValid));
+                UpdateApplicationRate();
+            }
+
             if (GpsConnected && !gpsConnected)
             {
                 GpsPositionValid = false;
@@ -696,30 +755,39 @@ namespace AOGBogballeBridge
                 SendEnable();
                 SendSections(); // Always send sections when they update
             }
-            // Section dimensions PGN: machine configuration from AgOpenGPS
+            // Section dimensions PGN: sixteen per-section widths in centimeters and a count.
             else if (pgn == 0xEB)
             {
                 if (data.Length < 38)
                     return;
 
-                double secWidth = BitConverter.ToUInt16(data, 5); // section width in cm
-                int secNum = data[37];                            // number of sections
+                int secNum = data[37];
+                if (secNum > 16)
+                {
+                    GpsStatus = $"Invalid machine configuration: {secNum} sections.";
+                    return;
+                }
 
-                // Only persist and warn when the configuration actually changes
-                if (secNum == _secNum && secWidth == _secWidth)
+                double[] sectionWidthsCm = new double[secNum];
+                for (int i = 0; i < secNum; i++)
+                    sectionWidthsCm[i] = BitConverter.ToUInt16(data, 5 + i * 2);
+
+                if (secNum == _secNum && sectionWidthsCm.SequenceEqual(_sectionWidthsCm))
                     return;
 
-                _secWidth = secWidth;
                 _secNum = secNum;
-
+                _sectionWidthsCm = sectionWidthsCm;
+                _secWidth = sectionWidthsCm.Length > 0 ? sectionWidthsCm[0] : 0;
                 Properties.Settings.Default.SecNum = _secNum;
                 Properties.Settings.Default.SecWidth = _secWidth;
+                Properties.Settings.Default.SectionWidthsCm = string.Join(",", sectionWidthsCm.Select(width =>
+                    width.ToString("0", CultureInfo.InvariantCulture)));
                 Properties.Settings.Default.Save();
-
-                Debug.WriteLine($"Section configuration received: {_secNum} sections, each {_secWidth} cm");
 
                 ApplyConfig(showWarning: true);
                 SendTotalWidth();
+                UpdateToolbarPosition();
+                UpdateApplicationRate();
             }
             // AgIO Hello PGN
             else if (pgn == 0xC8)
@@ -757,6 +825,7 @@ namespace AOGBogballeBridge
             int payloadLength = data[4];
             if (payloadLength is not (16 or 24) || data.Length != payloadLength + 6)
             {
+                InvalidateGpsOutPosition();
                 GpsPositionValid = false;
                 GpsStatus = "Invalid GPSOut packet length.";
                 Debug.WriteLine($"Invalid GPSOut packet length: {data.Length} bytes, payload {payloadLength} bytes.");
@@ -769,6 +838,7 @@ namespace AOGBogballeBridge
             if (!double.IsFinite(longitude) || longitude is < -180 or > 180 ||
                 !double.IsFinite(latitude) || latitude is < -90 or > 90)
             {
+                InvalidateGpsOutPosition();
                 GpsPositionValid = false;
                 GpsStatus = "Invalid GPSOut coordinates.";
                 Debug.WriteLine($"GPSOut coordinates out of range: longitude {longitude}, latitude {latitude}.");
@@ -776,12 +846,125 @@ namespace AOGBogballeBridge
                 return;
             }
 
+            DateTime receivedAt = DateTime.UtcNow;
+            Point gpsPosition = new(longitude, latitude);
+            _gpsOutPosition = gpsPosition;
+            _lastGpsOutPositionAt = receivedAt;
             GpsLongitude = longitude;
             GpsLatitude = latitude;
             GpsPositionValid = true;
-            UpdateApplicationRate();
             GpsStatus = "GPS position received";
+            UpdateToolHeading(data, gpsPosition, receivedAt);
+            UpdateToolbarPosition();
+            UpdateApplicationRate();
         }
+
+        private void InvalidateGpsOutPosition()
+        {
+            _gpsOutPosition = null;
+            _toolHeadingValid = false;
+            OnPropertyChanged(nameof(ToolHeadingStatus));
+            OnPropertyChanged(nameof(ToolbarPositionValid));
+        }
+
+        private void UpdateToolHeading(byte[] data, Point currentPosition, DateTime receivedAt)
+        {
+            bool headingFromAog = false;
+            if (data[4] == 24)
+            {
+                double fixToFixHeading = ReadLittleEndianDouble(data, 21);
+                if (IsValidHeading(fixToFixHeading))
+                {
+                    _toolHeadingDegrees = fixToFixHeading;
+                    _toolHeadingUpdatedAt = receivedAt;
+                    _toolHeadingValid = true;
+                    _toolHeadingSource = "AOG Fix2Fix";
+                    headingFromAog = true;
+                }
+            }
+
+            if (!headingFromAog && _previousGpsPosition.HasValue && Speed >= 1.0)
+            {
+                double elapsedSeconds = (receivedAt - _previousGpsPositionAt).TotalSeconds;
+                double distanceMeters = CalculateDistanceMeters(_previousGpsPosition.Value, currentPosition);
+                if (elapsedSeconds is > 0.05 and <= 3 && distanceMeters >= 0.5)
+                {
+                    _toolHeadingDegrees = CalculateBearingDegrees(_previousGpsPosition.Value, currentPosition);
+                    _toolHeadingUpdatedAt = receivedAt;
+                    _toolHeadingValid = true;
+                    _toolHeadingSource = "GPS course";
+                }
+            }
+
+            _previousGpsPosition = currentPosition;
+            _previousGpsPositionAt = receivedAt;
+            if (_toolHeadingValid && receivedAt - _toolHeadingUpdatedAt > TimeSpan.FromSeconds(3))
+                _toolHeadingValid = false;
+
+            OnPropertyChanged(nameof(ToolHeadingDegrees));
+            OnPropertyChanged(nameof(ToolHeadingStatus));
+            OnPropertyChanged(nameof(ToolbarPositionValid));
+        }
+
+        private void UpdateToolbarPosition()
+        {
+            if (!GpsPositionValid || !_toolHeadingValid ||
+                DateTime.UtcNow - _toolHeadingUpdatedAt > TimeSpan.FromSeconds(3))
+            {
+                OnPropertyChanged(nameof(ToolbarPositionValid));
+                return;
+            }
+
+            Point gpsPoint = _gpsOutPosition!.Value;
+            Point toolbarPoint = MovePointByBearing(gpsPoint, _toolHeadingDegrees + 180, _toolbarOffsetMeters);
+            _toolbarLatitude = toolbarPoint.Y;
+            _toolbarLongitude = toolbarPoint.X;
+            OnPropertyChanged(nameof(ToolbarLatitude));
+            OnPropertyChanged(nameof(ToolbarLongitude));
+            OnPropertyChanged(nameof(ToolbarPositionValid));
+        }
+
+        private static bool IsValidHeading(double heading) =>
+            double.IsFinite(heading) && heading is >= 0 and < 360;
+
+        private static double CalculateBearingDegrees(Point from, Point to)
+        {
+            double latitude1 = DegreesToRadians(from.Y);
+            double latitude2 = DegreesToRadians(to.Y);
+            double longitudeDelta = DegreesToRadians(to.X - from.X);
+            double y = Math.Sin(longitudeDelta) * Math.Cos(latitude2);
+            double x = Math.Cos(latitude1) * Math.Sin(latitude2) -
+                       Math.Sin(latitude1) * Math.Cos(latitude2) * Math.Cos(longitudeDelta);
+            return (Math.Atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+
+        private static double CalculateDistanceMeters(Point from, Point to)
+        {
+            double latitude1 = DegreesToRadians(from.Y);
+            double latitude2 = DegreesToRadians(to.Y);
+            double latitudeDelta = latitude2 - latitude1;
+            double longitudeDelta = DegreesToRadians(to.X - from.X);
+            double haversine = Math.Pow(Math.Sin(latitudeDelta / 2), 2) +
+                               Math.Cos(latitude1) * Math.Cos(latitude2) * Math.Pow(Math.Sin(longitudeDelta / 2), 2);
+            return 2 * 6_371_000 * Math.Asin(Math.Sqrt(Math.Clamp(haversine, 0, 1)));
+        }
+
+        private static Point MovePointByBearing(Point position, double bearingDegrees, double distanceMeters)
+        {
+            double bearing = DegreesToRadians(bearingDegrees);
+            double angularDistance = distanceMeters / 6_371_000;
+            double latitude1 = DegreesToRadians(position.Y);
+            double longitude1 = DegreesToRadians(position.X);
+            double latitude2 = Math.Asin(
+                Math.Sin(latitude1) * Math.Cos(angularDistance) +
+                Math.Cos(latitude1) * Math.Sin(angularDistance) * Math.Cos(bearing));
+            double longitude2 = longitude1 + Math.Atan2(
+                Math.Sin(bearing) * Math.Sin(angularDistance) * Math.Cos(latitude1),
+                Math.Cos(angularDistance) - Math.Sin(latitude1) * Math.Sin(latitude2));
+            return new Point(longitude2 * 180 / Math.PI, latitude2 * 180 / Math.PI);
+        }
+
+        private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180;
 
         private void UpdateApplicationRate()
         {
@@ -807,26 +990,19 @@ namespace AOGBogballeBridge
             {
                 status = "Select a DBF rate field; spreading disabled.";
             }
+            else if (!ToolbarPositionValid)
+            {
+                status = "Waiting for valid toolbar width and heading; spreading disabled.";
+            }
+            else if (!TryCalculateSwathRate(out double averageRate, out string rateFailure))
+            {
+                status = rateFailure;
+            }
             else
             {
-                Point position = new(GpsLongitude, GpsLatitude);
-                ShapefileFeature? matchingFeature = ShapefileFeatures.FirstOrDefault(feature => feature.Contains(position));
-                if (matchingFeature == null)
-                {
-                    status = "Outside rate polygons; spreading disabled.";
-                }
-                else if (!matchingFeature.Attributes.TryGetValue(SelectedShapefileField, out string? candidate) ||
-                         !double.TryParse(candidate, NumberStyles.Float, CultureInfo.InvariantCulture, out double numericRate) ||
-                         !double.IsFinite(numericRate) || numericRate < 0)
-                {
-                    status = $"Rate field '{SelectedShapefileField}' is missing or invalid; spreading disabled.";
-                }
-                else
-                {
-                    rateText = Math.Round(numericRate, 2, MidpointRounding.AwayFromZero)
-                        .ToString("0.##", CultureInfo.InvariantCulture);
-                    status = $"Inside rate polygon; application rate {rateText} kg/ha.";
-                }
+                rateText = Math.Round(averageRate, 2, MidpointRounding.AwayFromZero)
+                    .ToString("0.##", CultureInfo.InvariantCulture);
+                status = $"Full toolbar coverage; average application rate {rateText} kg/ha.";
             }
 
             bool rateValid = rateText != null;
@@ -852,19 +1028,158 @@ namespace AOGBogballeBridge
             SendEnable();
         }
 
+        private bool TryCalculateSwathRate(out double averageRate, out string failure)
+        {
+            averageRate = 0;
+            double totalWidth = MachineWidthMeters;
+            if (!double.IsFinite(totalWidth) || totalWidth <= 0 || !ToolbarPositionValid ||
+                string.IsNullOrWhiteSpace(SelectedShapefileField))
+            {
+                failure = "Toolbar geometry is invalid; spreading disabled.";
+                return false;
+            }
+
+            Point toolbarCenter = new(_toolbarLongitude, _toolbarLatitude);
+            double halfWidth = totalWidth / 2;
+            List<double> boundaries = new() { -halfWidth, halfWidth };
+            AddSwathPolygonIntersections(toolbarCenter, _toolHeadingDegrees + 90, halfWidth, boundaries);
+            boundaries.Sort();
+
+            double weightedRateSum = 0;
+            double coveredWidth = 0;
+            double previousBoundary = boundaries[0];
+            for (int i = 1; i < boundaries.Count; i++)
+            {
+                double boundary = boundaries[i];
+                double segmentWidth = boundary - previousBoundary;
+                if (segmentWidth <= 0.0001)
+                    continue;
+
+                double crossTrackDistance = (previousBoundary + boundary) / 2;
+                Point samplePoint = MovePointByBearing(toolbarCenter, _toolHeadingDegrees + 90, crossTrackDistance);
+                ShapefileFeature? feature = ShapefileFeatures.FirstOrDefault(candidate => candidate.Contains(samplePoint));
+                if (feature == null)
+                {
+                    failure = "Toolbar crosses an uncovered area; spreading disabled.";
+                    return false;
+                }
+
+                if (!feature.Attributes.TryGetValue(SelectedShapefileField!, out string? value) ||
+                    !double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double rate) ||
+                    !double.IsFinite(rate) || rate < 0)
+                {
+                    failure = $"Rate field '{SelectedShapefileField}' is missing or invalid across the toolbar; spreading disabled.";
+                    return false;
+                }
+
+                weightedRateSum += rate * segmentWidth;
+                if (!double.IsFinite(weightedRateSum))
+                {
+                    failure = "Calculated toolbar rate is outside the supported numeric range; spreading disabled.";
+                    return false;
+                }
+
+                coveredWidth += segmentWidth;
+                previousBoundary = boundary;
+            }
+
+            if (Math.Abs(coveredWidth - totalWidth) > 0.001)
+            {
+                failure = "Toolbar coverage could not be verified; spreading disabled.";
+                return false;
+            }
+
+            averageRate = weightedRateSum / totalWidth;
+            if (!double.IsFinite(averageRate))
+            {
+                failure = "Calculated toolbar rate is outside the supported numeric range; spreading disabled.";
+                return false;
+            }
+
+            failure = string.Empty;
+            return true;
+        }
+
+        private void AddSwathPolygonIntersections(Point center, double crossTrackBearing, double halfWidth, List<double> boundaries)
+        {
+            double bearingRadians = DegreesToRadians(crossTrackBearing);
+            double directionX = Math.Sin(bearingRadians);
+            double directionY = Math.Cos(bearingRadians);
+            double normalX = -directionY;
+            double normalY = directionX;
+            double latitudeScale = Math.Cos(DegreesToRadians(center.Y));
+
+            Point ToLocalMeters(Point point)
+            {
+                double longitudeDelta = point.X - center.X;
+                if (longitudeDelta > 180)
+                    longitudeDelta -= 360;
+                else if (longitudeDelta < -180)
+                    longitudeDelta += 360;
+
+                return new Point(
+                    6_371_000 * DegreesToRadians(longitudeDelta) * latitudeScale,
+                    6_371_000 * DegreesToRadians(point.Y - center.Y));
+            }
+
+            foreach (ShapefileFeature feature in ShapefileFeatures)
+            {
+                if (feature.GeometryType != ShapefileGeometryType.Polygon)
+                    continue;
+
+                foreach (IReadOnlyList<Point> ring in feature.Parts)
+                {
+                    for (int i = 0, j = ring.Count - 1; i < ring.Count; j = i++)
+                    {
+                        Point a = ToLocalMeters(ring[j]);
+                        Point b = ToLocalMeters(ring[i]);
+                        double sideA = a.X * normalX + a.Y * normalY;
+                        double sideB = b.X * normalX + b.Y * normalY;
+                        if (Math.Abs(sideA) <= 1e-8 && Math.Abs(sideB) <= 1e-8)
+                        {
+                            AddIntersection(a);
+                            AddIntersection(b);
+                            continue;
+                        }
+
+                        if ((sideA < 0 && sideB > 0) || (sideA > 0 && sideB < 0) || Math.Abs(sideA) <= 1e-8 || Math.Abs(sideB) <= 1e-8)
+                        {
+                            double fraction = Math.Abs(sideA) <= 1e-8 ? 0 :
+                                Math.Abs(sideB) <= 1e-8 ? 1 : sideA / (sideA - sideB);
+                            AddIntersection(new Point(
+                                a.X + (b.X - a.X) * fraction,
+                                a.Y + (b.Y - a.Y) * fraction));
+                        }
+
+                        void AddIntersection(Point point)
+                        {
+                            double distance = point.X * directionX + point.Y * directionY;
+                            if (distance > -halfWidth && distance < halfWidth)
+                                boundaries.Add(distance);
+                        }
+                    }
+                }
+            }
+        }
+
         private static double ReadLittleEndianDouble(byte[] data, int offset) =>
             BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(offset, sizeof(double))));
 
         private void ApplyConfig(bool showWarning)
         {
-            // Bogballe control supports 2, 4 or 8 sections (expanded to 8 below)
-            _validConfig = _secNum > 0 && _secNum <= 8 && _secNum % 2 == 0;
+            bool widthsValid = _sectionWidthsCm.Length == _secNum &&
+                                _sectionWidthsCm.All(width => double.IsFinite(width) && width > 0);
+            _validConfig = _secNum is 2 or 4 or 8 && widthsValid;
+            _sectionWidthsMeters = _sectionWidthsCm.Select(width => width / 100.0).ToArray();
+            OnPropertyChanged(nameof(SectionWidthsMeters));
+            OnPropertyChanged(nameof(MachineWidthMeters));
+            OnPropertyChanged(nameof(ToolbarPositionValid));
             UpdateSections(_currentSectionMask);
 
+            Width = widthsValid ? Math.Round(_sectionWidthsCm.Sum() / 100.0, 1) : 0;
             if (_validConfig)
             {
-                Width = Math.Round(_secWidth / 100.0 * _secNum, 1);
-                ConfigText = $"{_secNum} sections, each {_secWidth:F0} cm (total {Width:F1} m)";
+                ConfigText = $"{_secNum} sections; total width {Width:F1} m";
             }
             else if (_secNum == 0)
             {
@@ -872,18 +1187,35 @@ namespace AOGBogballeBridge
             }
             else
             {
-                ConfigText = $"Unsupported: {_secNum} sections, each {_secWidth:F0} cm";
+                ConfigText = widthsValid
+                    ? $"Unsupported: {_secNum} sections; total width {Width:F1} m"
+                    : "Machine section widths are incomplete or invalid.";
 
                 if (showWarning)
                 {
                     MessageBox.Show(
-                        "Machine configuration not supported.\nPlease use either 2, 4 or 8 sections.\n\n" +
-                        $"Current setup: {_secNum} sections, each {_secWidth:F0} cm wide",
+                        "Machine configuration not supported.\nPlease use 2, 4 or 8 sections with a valid width for each section.\n\n" +
+                        ConfigText,
                         "AOG-Bogballe Bridge",
                         MessageBoxButton.OK,
                         MessageBoxImage.Warning);
                 }
             }
+        }
+
+        private static double[] ParseSavedSectionWidths(string? savedWidths, int sectionCount, double legacyWidth)
+        {
+            if (sectionCount <= 0 || sectionCount > 16)
+                return Array.Empty<double>();
+
+            string[] values = (savedWidths ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries);
+            if (values.Length == sectionCount && values.All(value =>
+                    double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double width) && width > 0))
+                return values.Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray();
+
+            return legacyWidth > 0
+                ? Enumerable.Repeat(legacyWidth, sectionCount).ToArray()
+                : Array.Empty<double>();
         }
 
         private void UpdateSections(byte mask)

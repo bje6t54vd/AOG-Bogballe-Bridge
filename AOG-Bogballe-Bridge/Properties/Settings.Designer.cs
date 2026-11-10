@@ -58,5 +58,29 @@ namespace AOGBogballeBridge.Properties {
                 this["SecWidth"] = value;
             }
         }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("")]
+        public string SectionWidthsCm {
+            get {
+                return ((string)(this["SectionWidthsCm"]));
+            }
+            set {
+                this["SectionWidthsCm"] = value;
+            }
+        }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("0")]
+        public double ToolbarOffsetMeters {
+            get {
+                return ((double)(this["ToolbarOffsetMeters"]));
+            }
+            set {
+                this["ToolbarOffsetMeters"] = value;
+            }
+        }
     }
 }
